@@ -144,6 +144,41 @@ def get_league_options() -> Dict[str, str]:
         "Other": "",  # no direct ESPN mapping; will use manual selection
     }
 
+def get_teams_for_league_label(
+    teams_by_league: Dict[str, List[str]],
+    all_teams: List[str],
+    league_label: str,
+) -> List[str]:
+    """
+    Map the UI league label (EPL, La Liga, ...) to one or more league
+    values in matches.csv and return the teams that belong to that league.
+
+    Adjust the strings in label_to_csv to match whatever you actually use
+    in the 'league' column of data/matches.csv.
+    """
+    label_to_csv = {
+        "EPL": ["EPL", "Premier League", "eng.1"],
+        "La Liga": ["La Liga", "LaLiga", "Spain La Liga", "esp.1"],
+        "Serie A": ["Serie A", "SerieA", "Italy Serie A", "ita.1"],
+        "Ligue 1": ["Ligue 1", "France Ligue 1", "fra.1"],
+        "Bundesliga": ["Bundesliga", "Germany Bundesliga", "ger.1"],
+        "Other": [],
+    }
+
+    # "Other" = all teams (or you can make this an empty list if you prefer)
+    if league_label == "Other":
+        return sorted(all_teams)
+
+    targets = label_to_csv.get(league_label, [])
+    if not targets:
+        return []
+
+    teams = set()
+    for csv_league, team_list in teams_by_league.items():
+        if csv_league in targets:
+            teams.update(team_list)
+
+    return sorted(teams)
 
 def normalize_team_name(name: str) -> str:
     """
@@ -343,14 +378,28 @@ def main():
         # ---------------- MATCH SELECTION ---------------- #
         st.markdown("### Match Selection")
 
-        league_options = get_league_options()
+                league_options = get_league_options()
         league_labels = list(league_options.keys())
         league_label = st.selectbox("League", league_labels, index=0)
         league_code = league_options[league_label]
 
+        # Teams grouped by the actual 'league' values in matches.csv
         teams_by_league = load_teams_by_league(matches_csv)
         all_teams_internal = load_teams(matches_csv)
-        internal_team_list = teams_by_league.get(league_label, all_teams_internal)
+
+        internal_team_list = get_teams_for_league_label(
+            teams_by_league=teams_by_league,
+            all_teams=all_teams_internal,
+            league_label=league_label,
+        )
+
+        if not internal_team_list:
+            st.warning(
+                "No teams found in data/matches.csv for this league label. "
+                "Showing all teams instead."
+            )
+            internal_team_list = all_teams_internal
+
 
         input_mode = st.radio(
             "Match Input Mode",
