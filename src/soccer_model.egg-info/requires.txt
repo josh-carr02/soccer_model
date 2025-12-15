@@ -1,0 +1,6 @@
+pandas
+numpy
+scipy
+pymc
+arviz
+streamlit

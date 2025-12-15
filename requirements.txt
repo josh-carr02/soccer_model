@@ -1,0 +1,8 @@
+-e .
+streamlit
+pandas
+numpy
+scipy
+pymc
+arviz
+requests

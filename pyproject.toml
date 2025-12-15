@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soccer-model"
+version = "0.1.0"
+description = "Bayesian xG, Poisson, Dixon-Coles and xT-based soccer betting model"
+authors = [{ name = "Your Name" }]
+readme = ""
+requires-python = ">=3.10"
+dependencies = [
+    "pandas",
+    "numpy",
+    "scipy",
+    "pymc",
+    "arviz",
+    "streamlit",
+    "requests",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
