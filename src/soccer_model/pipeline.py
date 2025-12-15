@@ -50,8 +50,19 @@ def evaluate_match_markets(dc_model: DixonColesWrapper,
     bets_ah = best_asian_ev(pmatrix, ah_line, odds_fav, odds_dog,
                             home_is_favored=home_is_favored)
 
-    return {
-        "1x2": {"probs": probs_1x2, "bets": bets_1x2},
-        "totals": {"line": total_line, "bets": bets_totals},
-        "asian": {"line": ah_line, "bets": bets_ah},
-    }
+  return {
+    "moneyline": {
+        "probs": probs_1x2,
+        "bets": bets_1x2,
+    },
+    "totals": {
+        "line": total_line,
+        "bets": bets_totals,
+    },
+    "asian": {
+        "line": ah_line,
+        "bets": bets_asian,
+    },
+}
+
+
