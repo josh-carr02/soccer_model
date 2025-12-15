@@ -578,7 +578,7 @@ if input_mode == "Manual team selection":
     home_team = display_to_internal(home_team_display)
     away_team = display_to_internal(away_team_display)
 
-        st.markdown("---")
+st.markdown("---")
 
         ## League + API config
 # Live odds API config (reuse league_label, sport_key, api_key_default from above)
