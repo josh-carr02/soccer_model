@@ -375,10 +375,10 @@ def main():
             st.error(f"`matches.csv` not found at `{matches_csv}`.")
             return
 
-        # ---------------- MATCH SELECTION ---------------- #
+  # ---------------- MATCH SELECTION ---------------- #
         st.markdown("### Match Selection")
 
-                league_options = get_league_options()
+        league_options = get_league_options()
         league_labels = list(league_options.keys())
         league_label = st.selectbox("League", league_labels, index=0)
         league_code = league_options[league_label]
