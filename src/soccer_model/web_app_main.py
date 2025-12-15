@@ -244,7 +244,7 @@ def main():
 
     # -------------------- TRAIN TAB -------------------- #
     with tab_train:
-        st.subheader("Offline Training (Bayesian xG → Poisson)")
+        st.subheader("Model Training (Bayesian xG → Poisson)")
 
         if not matches_csv.exists():
             st.error(f"matches.csv not found at {matches_csv}")
