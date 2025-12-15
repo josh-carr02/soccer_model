@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 import pickle
 from typing import Tuple, Dict, List, Optional
 
-import json
 import pandas as pd
 import requests
+from bs4 import BeautifulSoup
 import streamlit as st
 
 from soccer_model.models_poisson import PoissonGoalModel, TeamStrength
@@ -130,44 +130,18 @@ def load_model_index(models_dir: Path) -> Optional[pd.DataFrame]:
     return None
 
 
-def get_secrets() -> Tuple[str, str]:
-    """
-    Retrieve ODDS_API_KEY and ODDS_API_BASE from Streamlit secrets or env vars.
-    For Streamlit Cloud, set them in Settings → Secrets.
-    """
-    api_key = ""
-    base_url = ""
-
-    # Streamlit secrets (cloud)
-    try:
-        if "ODDS_API_KEY" in st.secrets:
-            api_key = st.secrets["ODDS_API_KEY"]
-        if "ODDS_API_BASE" in st.secrets:
-            base_url = st.secrets["ODDS_API_BASE"]
-    except Exception:
-        pass
-
-    # Environment variables (local)
-    if not api_key:
-        api_key = os.environ.get("ODDS_API_KEY", "")
-    if not base_url:
-        base_url = os.environ.get("ODDS_API_BASE", "")
-
-    return api_key, base_url
-
-
 def get_league_options() -> Dict[str, str]:
     """
-    Map friendly league names to API sport keys.
-    Adjust these depending on your odds provider.
+    Map friendly league names to ESPN league codes.
+    These are used by the ESPN fixtures scraper.
     """
     return {
-        "EPL": "soccer_epl",
-        "La Liga": "soccer_spain_la_liga",
-        "Serie A": "soccer_italy_serie_a",
-        "Ligue 1": "soccer_france_ligue_one",
-        "Bundesliga": "soccer_germany_bundesliga",
-        "Other": "soccer",
+        "EPL": "eng.1",
+        "La Liga": "esp.1",
+        "Serie A": "ita.1",
+        "Ligue 1": "fra.1",
+        "Bundesliga": "ger.1",
+        "Other": "",  # no direct ESPN mapping; will use manual selection
     }
 
 
@@ -184,7 +158,7 @@ def normalize_team_name(name: str) -> str:
 
 def map_api_team_to_internal(api_name: str, internal_team_list: List[str]) -> Optional[str]:
     """
-    Try to map an API team name (e.g. 'Manchester United') to one of
+    Try to map a scraped ESPN team name (e.g. 'Manchester United') to one of
     your internal team strings (e.g. 'Manchester_United').
     Returns the internal team name or None if not found.
     """
@@ -197,162 +171,67 @@ def map_api_team_to_internal(api_name: str, internal_team_list: List[str]) -> Op
     return None
 
 
-def fetch_live_odds_from_api(
-    api_key: str,
-    base_url: str,
-    sport_key: str,
-    home_team_display: str,
-    away_team_display: str,
-    region: str = "us",
-) -> Optional[Dict]:
+def scrape_espn_schedule(league_code: str, date_str: str) -> List[Dict]:
     """
-    Example live odds fetch using a REST API (like The Odds API).
+    Scrape ESPN match schedules.
 
-    Returns a dict:
-      {
-        "home_ml": ...,
-        "away_ml": ...,
-        "draw_ml": ... or None,
-        "total": ... or None,
-        "over_ml": ... or None,
-        "under_ml": ... or None,
-      }
-    or None if not found / error.
+    league_code examples:
+        'eng.1' = Premier League
+        'esp.1' = La Liga
+        'ita.1' = Serie A
+        'fra.1' = Ligue 1
+        'ger.1' = Bundesliga
+
+    date_str format: 'YYYYMMDD' (ESPN format)
+    e.g. '20251216'
+
+    Returns list of fixtures:
+        [
+            {
+                "home": "Manchester United",
+                "away": "Bournemouth",
+                "time": "3:00 PM",
+            },
+            ...
+        ]
     """
-    if not api_key or not base_url:
-        return None
-
-    try:
-        url = f"{base_url}/sports/{sport_key}/odds"
-        params = {
-            "apiKey": api_key,
-            "regions": region,
-            "markets": "h2h,totals",
-            "oddsFormat": "american",
-            "dateFormat": "iso",
-        }
-        resp = requests.get(url, params=params, timeout=8)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        return None
-
-    home_lower = home_team_display.lower()
-    away_lower = away_team_display.lower()
-
-    match_obj = None
-    for game in data:
-        teams = [str(t).lower() for t in game.get("teams", [])]
-        home_team_api = str(game.get("home_team", "")).lower()
-
-        if home_lower in home_team_api and any(away_lower in t for t in teams):
-            match_obj = game
-            break
-        if away_lower in home_team_api and any(home_lower in t for t in teams):
-            match_obj = game
-            break
-
-    if not match_obj:
-        return None
-
-    home_ml = away_ml = draw_ml = None
-    total_line = None
-    over_ml = under_ml = None
-
-    bookmakers = match_obj.get("bookmakers", [])
-    if not bookmakers:
-        return None
-
-    bm = bookmakers[0]
-    markets = bm.get("markets", [])
-
-    for mkt in markets:
-        key = mkt.get("key")
-        outcomes = mkt.get("outcomes", [])
-        if key == "h2h":
-            for o in outcomes:
-                name = str(o.get("name", "")).lower()
-                price = o.get("price")
-                if price is None:
-                    continue
-                if home_lower in name:
-                    home_ml = price
-                elif away_lower in name:
-                    away_ml = price
-                elif "draw" in name or "tie" in name:
-                    draw_ml = price
-        elif key == "totals":
-            for o in outcomes:
-                name = str(o.get("name", "")).lower()
-                price = o.get("price")
-                point = o.get("point")
-                if price is None or point is None:
-                    continue
-                total_line = float(point)
-                if "over" in name:
-                    over_ml = price
-                elif "under" in name:
-                    under_ml = price
-
-    if home_ml is None or away_ml is None:
-        return None
-
-    return {
-        "home_ml": home_ml,
-        "away_ml": away_ml,
-        "draw_ml": draw_ml,
-        "total": total_line,
-        "over_ml": over_ml,
-        "under_ml": under_ml,
-    }
-
-
-def fetch_fixtures_from_api(
-    api_key: str,
-    base_url: str,
-    sport_key: str,
-    region: str = "us",
-) -> List[Dict]:
-    """
-    Fetch upcoming fixtures for a league using the odds API.
-    We call the h2h odds endpoint and treat each game as a fixture.
-    """
-    if not api_key or not base_url:
+    if not league_code:
         return []
 
-    try:
-        url = f"{base_url}/sports/{sport_key}/odds"
-        params = {
-            "apiKey": api_key,
-            "regions": region,
-            "markets": "h2h",
-            "oddsFormat": "american",
-            "dateFormat": "iso",
-        }
-        resp = requests.get(url, params=params, timeout=8)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        return []
+    url = f"https://www.espn.com/soccer/fixtures/_/league/{league_code}/date/{date_str}"
 
     fixtures: List[Dict] = []
-    for game in data:
-        home_team_api = str(game.get("home_team", ""))
-        teams = game.get("teams", [])
-        if len(teams) != 2:
+    try:
+        page = requests.get(url, timeout=10)
+        page.raise_for_status()
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(page.text, "html.parser")
+
+    # ESPN uses TR rows with various classes; grab all small-table rows
+    rows = soup.find_all("tr")
+    for row in rows:
+        cells = row.find_all("td")
+        if len(cells) < 3:
             continue
-        if teams[0] == home_team_api:
-            away_team_api = teams[1]
-        else:
-            away_team_api = teams[0]
+
+        home = cells[0].get_text(strip=True)
+        away = cells[1].get_text(strip=True)
+        time_txt = cells[2].get_text(strip=True)
+
+        # crude filter to avoid header or empty rows
+        if not home or not away or home == "MATCH" or away == "MATCH":
+            continue
 
         fixtures.append(
             {
-                "home": home_team_api,
-                "away": away_team_api,
-                "commence_time": game.get("commence_time", ""),
+                "home": home,
+                "away": away,
+                "time": time_txt,
             }
         )
+
     return fixtures
 
 
@@ -457,7 +336,6 @@ def main():
 
         dc_model = get_dc_model(str(models_dir), selected_model_file)
 
-        # Ensure matches exist
         if not matches_csv.exists():
             st.error(f"`matches.csv` not found at `{matches_csv}`.")
             return
@@ -468,7 +346,7 @@ def main():
         league_options = get_league_options()
         league_labels = list(league_options.keys())
         league_label = st.selectbox("League", league_labels, index=0)
-        sport_key = league_options[league_label]
+        league_code = league_options[league_label]
 
         teams_by_league = load_teams_by_league(matches_csv)
         all_teams_internal = load_teams(matches_csv)
@@ -476,46 +354,44 @@ def main():
 
         input_mode = st.radio(
             "Match Input Mode",
-            ["From today's fixtures (API)", "Manual team selection"],
+            ["From ESPN schedule", "Manual team selection"],
             index=0,
             horizontal=True,
         )
 
-        region = st.text_input("Region (for API)", value="us")
+        today = date.today()
+        match_date = st.date_input("Match Date", value=today)
+        espn_date_str = match_date.strftime("%Y%m%d")
 
         home_team_display = ""
         away_team_display = ""
         home_team = ""
         away_team = ""
 
-        api_key_default, base_url_default = get_secrets()
-
-        if input_mode == "From today's fixtures (API)":
-            if not api_key_default or not base_url_default:
+        if input_mode == "From ESPN schedule":
+            if not league_code:
                 st.warning(
-                    "Live odds API is not configured (no ODDS_API_KEY/ODDS_API_BASE). "
-                    "Switching to manual selection."
+                    "Selected league does not have an ESPN code mapping. "
+                    "Please use manual team selection."
                 )
                 input_mode = "Manual team selection"
             else:
-                with st.spinner("Fetching today's fixtures for this league..."):
-                    fixtures = fetch_fixtures_from_api(
-                        api_key_default, base_url_default, sport_key, region=region
-                    )
+                with st.spinner("Scraping ESPN schedule for this league and date..."):
+                    fixtures = scrape_espn_schedule(league_code, espn_date_str)
 
                 if not fixtures:
                     st.warning(
-                        "No fixtures returned from API for this league. "
+                        "No fixtures found on ESPN for this league/date. "
                         "Switching to manual team selection."
                     )
                     input_mode = "Manual team selection"
                 else:
-                    fixture_labels = [
-                        f"{f['home']} vs {f['away']} ({f.get('commence_time','')})"
+                    labels = [
+                        f"{f['home']} vs {f['away']} ({f['time']})"
                         for f in fixtures
                     ]
-                    selected_label = st.selectbox("Select Fixture", fixture_labels, index=0)
-                    idx = fixture_labels.index(selected_label)
+                    selected = st.selectbox("Select Fixture", labels, index=0)
+                    idx = labels.index(selected)
                     fixture = fixtures[idx]
 
                     home_api = fixture["home"]
@@ -526,8 +402,8 @@ def main():
 
                     if not mapped_home or not mapped_away:
                         st.warning(
-                            "Could not map fixture team names to your internal team list. "
-                            "Please use manual selection instead."
+                            "Could not map ESPN team names to your internal team list. "
+                            "Please use manual team selection."
                         )
                         input_mode = "Manual team selection"
                     else:
@@ -537,9 +413,8 @@ def main():
                         away_team_display = internal_to_display(away_team)
 
                         st.success(
-                            f"Using fixture: **{home_api} vs {away_api}**  \n"
-                            f"Mapped to internal teams: **{home_team_display}** vs "
-                            f"**{away_team_display}**"
+                            f"Using fixture: **{home_api} vs {away_api}** "
+                            f"→ mapped to **{home_team_display}** vs **{away_team_display}**"
                         )
 
         if input_mode == "Manual team selection":
@@ -558,87 +433,16 @@ def main():
 
         st.markdown("---")
 
-        # ---------------- LIVE ODDS API CONFIG ---------------- #
-        st.markdown("### Live Odds API")
-
-        col_api1, col_api2 = st.columns(2)
-        with col_api1:
-            if api_key_default and base_url_default:
-                st.success(
-                    f"Live odds API configured via Secrets. League: **{league_label}** "
-                    f"({sport_key})"
-                )
-            else:
-                st.warning(
-                    "Live odds API is not fully configured. "
-                    "Set ODDS_API_KEY and ODDS_API_BASE in the app Secrets."
-                )
-        with col_api2:
-            st.write(f"Region: `{region}`")
-
-        def ss_get(name: str, default: float) -> float:
-            return float(st.session_state.get(name, default))
-
-        with st.expander("Live Odds (Optional)"):
-            st.write("Fetch live odds and pre-fill the American odds fields.")
-            if st.button("Gather Live Odds For This Match"):
-                if not api_key_default or not base_url_default:
-                    st.warning(
-                        "No API key/base URL configured. "
-                        "Add ODDS_API_KEY and ODDS_API_BASE in the app Secrets."
-                    )
-                else:
-                    with st.spinner("Fetching live odds from API..."):
-                        live_odds = fetch_live_odds_from_api(
-                            api_key_default,
-                            base_url_default,
-                            sport_key,
-                            home_team_display,
-                            away_team_display,
-                            region=region,
-                        )
-                    if live_odds is None:
-                        st.warning(
-                            "No live odds found for this match (or API response format mismatch)."
-                        )
-                    else:
-                        st.success("Live odds fetched.")
-                        for key in [
-                            "home_ml",
-                            "away_ml",
-                            "draw_ml",
-                            "total",
-                            "over_ml",
-                            "under_ml",
-                        ]:
-                            if live_odds.get(key) is not None:
-                                st.session_state[key] = live_odds[key]
-                        st.json(live_odds)
-
-        st.markdown("---")
-
         # ---------------- MONEYLINE INPUTS ---------------- #
         st.markdown("### Moneyline (American Odds)")
 
         col_ml1, col_ml2, col_ml3 = st.columns(3)
         with col_ml1:
-            home_ml = st.number_input(
-                "Home ML",
-                value=ss_get("home_ml", -125.0),
-                key="home_ml_input",
-            )
+            home_ml = st.number_input("Home ML", value=-125.0)
         with col_ml2:
-            draw_ml = st.number_input(
-                "Draw ML",
-                value=ss_get("draw_ml", 310.0),
-                key="draw_ml_input",
-            )
+            draw_ml = st.number_input("Draw ML", value=310.0)
         with col_ml3:
-            away_ml = st.number_input(
-                "Away ML",
-                value=ss_get("away_ml", 290.0),
-                key="away_ml_input",
-            )
+            away_ml = st.number_input("Away ML", value=290.0)
 
         odds_home = american_to_decimal(home_ml)
         odds_draw = american_to_decimal(draw_ml)
@@ -649,23 +453,11 @@ def main():
 
         col_tot1, col_tot2, col_tot3 = st.columns(3)
         with col_tot1:
-            total_line = st.number_input(
-                "Total Line",
-                value=ss_get("total", 2.5),
-                key="total_line_input",
-            )
+            total_line = st.number_input("Total Line", value=2.5)
         with col_tot2:
-            over_ml = st.number_input(
-                "Over ML",
-                value=ss_get("over_ml", -110.0),
-                key="over_ml_input",
-            )
+            over_ml = st.number_input("Over ML", value=-110.0)
         with col_tot3:
-            under_ml = st.number_input(
-                "Under ML",
-                value=ss_get("under_ml", -110.0),
-                key="under_ml_input",
-            )
+            under_ml = st.number_input("Under ML", value=-110.0)
 
         odds_over = american_to_decimal(over_ml)
         odds_under = american_to_decimal(under_ml)

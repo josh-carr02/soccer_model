@@ -6,3 +6,4 @@ scipy
 pymc
 arviz
 requests
+beautifulsoup4
