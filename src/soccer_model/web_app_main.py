@@ -263,7 +263,7 @@ def main():
         else:
             st.info("Models directory does not exist yet.")
 
-        if st.button("Train New Model Now")
+        if st.button("Train New Model Now"):
             with st.spinner("Running Bayesian Training via train_only.main()..."):
                 # This calls your existing training script (versioning + index)
                 train_only.main()
