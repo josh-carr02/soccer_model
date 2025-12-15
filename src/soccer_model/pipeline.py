@@ -21,23 +21,30 @@ def build_models(matches_csv: str | Path):
     return matches, bayes_model, poisson_model, dc_model
 
 
-def evaluate_match_markets(dc_model: DixonColesWrapper,
-                           home_team: str,
-                           away_team: str,
-                           odds_home: float,
-                           odds_draw: float,
-                           odds_away: float,
-                           total_line: float,
-                           odds_over: float,
-                           odds_under: float,
-                           ah_line: float,
-                           odds_fav: float,
-                           odds_dog: float,
-                           home_is_favored: bool = True):
+def evaluate_match_markets(
+    dc_model: DixonColesWrapper,
+    home_team: str,
+    away_team: str,
+    odds_home: float,
+    odds_draw: float,
+    odds_away: float,
+    total_line: float,
+    odds_over: float,
+    odds_under: float,
+    ah_line: float,
+    odds_fav: float,
+    odds_dog: float,
+    home_is_favored: bool = True,
+):
     """
-    Evaluate 1X2, totals, and Asian handicap markets for a given match.
+    Evaluate Moneyline (formerly 1X2), totals, and Asian handicap markets for a given match.
+
+    Returns a dict with keys:
+      - "moneyline": {"probs": ..., "bets": [...]}
+      - "totals":    {"line": total_line, "bets": [...]}
+      - "asian":     {"line": ah_line,    "bets": [...]}
     """
-    # 1X2 probabilities, adjusted by Dixon–Coles
+    # Moneyline Probabilities, Adjusted by Dixon–Coles
     probs_1x2 = dc_model.result_probabilities(home_team, away_team)
     bets_1x2 = best_1x2_ev(probs_1x2, odds_home, odds_draw, odds_away)
 
@@ -47,22 +54,25 @@ def evaluate_match_markets(dc_model: DixonColesWrapper,
 
     # Asian handicap using adjusted score matrix
     pmatrix = dc_model.adjusted_score_matrix(home_team, away_team)
-    bets_ah = best_asian_ev(pmatrix, ah_line, odds_fav, odds_dog,
-                            home_is_favored=home_is_favored)
+    bets_asian = best_asian_ev(
+        pmatrix,
+        ah_line,
+        odds_fav,
+        odds_dog,
+        home_is_favored=home_is_favored,
+    )
 
-  return {
-    "moneyline": {
-        "probs": probs_1x2,
-        "bets": bets_1x2,
-    },
-    "totals": {
-        "line": total_line,
-        "bets": bets_totals,
-    },
-    "asian": {
-        "line": ah_line,
-        "bets": bets_asian,
-    },
-}
-
-
+    return {
+        "moneyline": {
+            "probs": probs_1x2,
+            "bets": bets_1x2,
+        },
+        "totals": {
+            "line": total_line,
+            "bets": bets_totals,
+        },
+        "asian": {
+            "line": ah_line,
+            "bets": bets_asian,
+        },
+    }
