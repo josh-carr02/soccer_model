@@ -1,10 +1,13 @@
 from __future__ import annotations
-from pathlib import Path
-from datetime import datetime
-import pickle
-import re
-import os
 
+import os
+import re
+from datetime import datetime
+from pathlib import Path
+import pickle
+from typing import Tuple, Dict, List, Optional
+
+import json
 import pandas as pd
 import requests
 import streamlit as st
@@ -18,7 +21,7 @@ from soccer_model import train_only
 # ----------------------- PAGE CONFIG ----------------------- #
 
 st.set_page_config(
-    page_title="Soccer Betting Model",
+    page_title="Soccer Betting Model – Train & Predict",
     page_icon="⚽",
     layout="wide",
 )
@@ -42,111 +45,21 @@ def internal_to_display(name: str) -> str:
 def display_to_internal(name: str) -> str:
     return name.strip().replace(" ", "_")
 
-import json
-import math
-import re
 
-def normalize_team_name(name: str) -> str:
+def list_model_versions(models_dir: Path) -> List[str]:
     """
-    Normalize a team name for fuzzy matching:
-    lowercase, remove spaces, underscores and punctuation.
-    """
-    name = name.lower()
-    name = name.replace("_", " ")
-    name = re.sub(r"[^a-z0-9]+", "", name)
-    return name
-
-
-def map_api_team_to_internal(api_name: str, internal_team_list: list[str]) -> str | None:
-    """
-    Try to map an API team name (e.g. 'Manchester United') to one of
-    your internal team strings (e.g. 'Manchester_United').
-    Returns the internal team name or None if not found.
-    """
-    target = normalize_team_name(api_name)
-    for t in internal_team_list:
-        if normalize_team_name(t) == target:
-            return t
-        # also compare to display version
-        if normalize_team_name(internal_to_display(t)) == target:
-            return t
-    return None
-
-
-def fetch_fixtures_from_api(
-    api_key: str,
-    base_url: str,
-    sport_key: str,
-    region: str = "us",
-) -> list[dict]:
-    """
-    Fetch upcoming fixtures for a league using the odds API.
-    We call the h2h odds endpoint and treat each game as a fixture.
-
-    Returns a list of dicts:
-    [
-      {
-        "home": "Manchester United",
-        "away": "Bournemouth",
-        "commence_time": "2025-12-15T18:00:00Z",
-      },
-      ...
-    ]
-    """
-    if not api_key or not base_url:
-        return []
-
-    try:
-        url = f"{base_url}/sports/{sport_key}/odds"
-        params = {
-            "apiKey": api_key,
-            "regions": region,
-            "markets": "h2h",
-            "oddsFormat": "american",
-            "dateFormat": "iso",
-        }
-        resp = requests.get(url, params=params, timeout=8)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        return []
-
-    fixtures = []
-    for game in data:
-        home_team_api = str(game.get("home_team", ""))
-        teams = game.get("teams", [])
-        if len(teams) != 2:
-            continue
-        # figure out which is away
-        if teams[0] == home_team_api:
-            away_team_api = teams[1]
-        else:
-            away_team_api = teams[0]
-        fixtures.append(
-            {
-                "home": home_team_api,
-                "away": away_team_api,
-                "commence_time": game.get("commence_time", ""),
-            }
-        )
-    return fixtures
-
-
-
-def list_model_versions(models_dir: Path) -> list[str]:
-    """
-    Return a sorted list of available model files (versioned), plus
-    'poisson_model_latest.pkl' if present.
+    Return a sorted list of available Poisson model files.
+    Includes poisson_model_latest.pkl if present.
     """
     pattern = re.compile(r"poisson_model_(\d{8}_\d{6})\.pkl")
-    versions: list[str] = []
+    versions: List[str] = []
 
     for p in models_dir.glob("poisson_model_*.pkl"):
         m = pattern.match(p.name)
         if m:
             versions.append(p.name)
 
-    versions.sort()  # chronological order
+    versions.sort()
 
     latest = models_dir / "poisson_model_latest.pkl"
     if latest.exists():
@@ -179,7 +92,15 @@ def load_poisson_model(models_dir: Path, model_file: str) -> PoissonGoalModel:
     )
     return poisson_model
 
-def load_teams_by_league(matches_csv: Path) -> dict[str, list[str]]:
+
+def load_teams(matches_csv: Path) -> List[str]:
+    df = pd.read_csv(matches_csv)
+    teams = pd.unique(df[["home_team", "away_team"]].values.ravel("K"))
+    teams = sorted(str(t) for t in teams)
+    return teams
+
+
+def load_teams_by_league(matches_csv: Path) -> Dict[str, List[str]]:
     """
     Return mapping: league_label -> list of internal team names.
 
@@ -189,35 +110,27 @@ def load_teams_by_league(matches_csv: Path) -> dict[str, list[str]]:
     df = pd.read_csv(matches_csv)
 
     if "league" not in df.columns:
-        # Fallback: all teams under "Other"
         all_teams = pd.unique(df[["home_team", "away_team"]].values.ravel("K"))
         return {"Other": sorted(str(t) for t in all_teams)}
 
-    teams_by_league: dict[str, set[str]] = {}
+    teams_by_league: Dict[str, set] = {}
     for _, row in df.iterrows():
         league = str(row["league"])
         ht = str(row["home_team"])
         at = str(row["away_team"])
         teams_by_league.setdefault(league, set()).update([ht, at])
 
-    # Convert sets to sorted lists
     return {lg: sorted(list(ts)) for lg, ts in teams_by_league.items()}
 
 
-def load_teams(matches_csv: Path) -> list[str]:
-    df = pd.read_csv(matches_csv)
-    teams = pd.unique(df[["home_team", "away_team"]].values.ravel("K"))
-    teams = sorted(str(t) for t in teams)
-    return teams
-
-
-def load_model_index(models_dir: Path) -> pd.DataFrame | None:
+def load_model_index(models_dir: Path) -> Optional[pd.DataFrame]:
     index_path = models_dir / "model_index.csv"
     if index_path.exists():
         return pd.read_csv(index_path)
     return None
 
-def get_secrets() -> tuple[str, str]:
+
+def get_secrets() -> Tuple[str, str]:
     """
     Retrieve ODDS_API_KEY and ODDS_API_BASE from Streamlit secrets or env vars.
     For Streamlit Cloud, set them in Settings → Secrets.
@@ -243,19 +156,45 @@ def get_secrets() -> tuple[str, str]:
     return api_key, base_url
 
 
-def get_league_options() -> dict[str, str]:
+def get_league_options() -> Dict[str, str]:
     """
     Map friendly league names to API sport keys.
     Adjust these depending on your odds provider.
     """
     return {
-        "English PL": "soccer_epl",
+        "EPL": "soccer_epl",
         "La Liga": "soccer_spain_la_liga",
         "Serie A": "soccer_italy_serie_a",
         "Ligue 1": "soccer_france_ligue_one",
         "Bundesliga": "soccer_germany_bundesliga",
         "Other": "soccer",
     }
+
+
+def normalize_team_name(name: str) -> str:
+    """
+    Normalize a team name for fuzzy matching:
+    lowercase, remove spaces, underscores and punctuation.
+    """
+    name = name.lower()
+    name = name.replace("_", " ")
+    name = re.sub(r"[^a-z0-9]+", "", name)
+    return name
+
+
+def map_api_team_to_internal(api_name: str, internal_team_list: List[str]) -> Optional[str]:
+    """
+    Try to map an API team name (e.g. 'Manchester United') to one of
+    your internal team strings (e.g. 'Manchester_United').
+    Returns the internal team name or None if not found.
+    """
+    target = normalize_team_name(api_name)
+    for t in internal_team_list:
+        if normalize_team_name(t) == target:
+            return t
+        if normalize_team_name(internal_to_display(t)) == target:
+            return t
+    return None
 
 
 def fetch_live_odds_from_api(
@@ -265,9 +204,9 @@ def fetch_live_odds_from_api(
     home_team_display: str,
     away_team_display: str,
     region: str = "us",
-) -> dict | None:
+) -> Optional[Dict]:
     """
-    Example live odds fetch using a generic REST API (like The Odds API).
+    Example live odds fetch using a REST API (like The Odds API).
 
     Returns a dict:
       {
@@ -290,8 +229,9 @@ def fetch_live_odds_from_api(
             "regions": region,
             "markets": "h2h,totals",
             "oddsFormat": "american",
+            "dateFormat": "iso",
         }
-        resp = requests.get(url, params=params, timeout=5)
+        resp = requests.get(url, params=params, timeout=8)
         resp.raise_for_status()
         data = resp.json()
     except Exception:
@@ -367,7 +307,56 @@ def fetch_live_odds_from_api(
     }
 
 
-def format_ev_line(selection: str, line_str: str | None, prob: float, ev: float, ev_percent: float) -> str:
+def fetch_fixtures_from_api(
+    api_key: str,
+    base_url: str,
+    sport_key: str,
+    region: str = "us",
+) -> List[Dict]:
+    """
+    Fetch upcoming fixtures for a league using the odds API.
+    We call the h2h odds endpoint and treat each game as a fixture.
+    """
+    if not api_key or not base_url:
+        return []
+
+    try:
+        url = f"{base_url}/sports/{sport_key}/odds"
+        params = {
+            "apiKey": api_key,
+            "regions": region,
+            "markets": "h2h",
+            "oddsFormat": "american",
+            "dateFormat": "iso",
+        }
+        resp = requests.get(url, params=params, timeout=8)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return []
+
+    fixtures: List[Dict] = []
+    for game in data:
+        home_team_api = str(game.get("home_team", ""))
+        teams = game.get("teams", [])
+        if len(teams) != 2:
+            continue
+        if teams[0] == home_team_api:
+            away_team_api = teams[1]
+        else:
+            away_team_api = teams[0]
+
+        fixtures.append(
+            {
+                "home": home_team_api,
+                "away": away_team_api,
+                "commence_time": game.get("commence_time", ""),
+            }
+        )
+    return fixtures
+
+
+def format_ev_line(selection: str, line_str: Optional[str], prob: float, ev: float, ev_percent: float) -> str:
     """
     Return an HTML-formatted line with color-coded EV%.
     """
@@ -378,10 +367,7 @@ def format_ev_line(selection: str, line_str: str | None, prob: float, ev: float,
     else:
         color = "gray"
 
-    if line_str:
-        label = f"{selection} {line_str}"
-    else:
-        label = selection
+    label = selection if not line_str else f"{selection} {line_str}"
 
     return (
         f"<span style='font-weight:600'>{label}</span> — "
@@ -391,7 +377,7 @@ def format_ev_line(selection: str, line_str: str | None, prob: float, ev: float,
     )
 
 
-# ----------------------- APP ----------------------- #
+# ----------------------- MAIN APP ----------------------- #
 
 def main():
     project_root = Path(__file__).resolve().parents[2]
@@ -400,12 +386,10 @@ def main():
     logs_dir = project_root / "logs"
     logs_dir.mkdir(exist_ok=True)
 
-    st.title("Soccer Betting Model")
-    st.caption("Bayesian xG · Poisson · Dixon–Coles · EV-Based Picks")
+    st.title("Soccer Betting Model – Train & Predict")
+    st.caption("Poisson / Dixon–Coles / Bayesian xG · EV-Based Pricing · The Book Beaters")
 
-    # Sidebar logo / info
-    st.sidebar.markdown("### The Book Beaters")
-    st.sidebar.markdown("Professional Soccer Pricing Dashboard")
+    st.sidebar.markdown("### Model Version & Settings")
 
     tab_train, tab_predict = st.tabs(["Train Model", "Predict & Pick"])
 
@@ -435,14 +419,14 @@ def main():
             if not matches_csv.exists():
                 st.error("Cannot train: `matches.csv` is missing.")
             else:
-                with st.spinner("Training Models..."):
+                with st.spinner("Running Bayesian training via `train_only.main()`..."):
                     train_only.main()
                 st.success("Training complete. Model files and index updated.")
                 st.cache_resource.clear()
 
     # -------------------- PREDICT TAB -------------------- #
     with tab_predict:
-        st.markdown("## Predict & Pick")
+        st.markdown("## Predict Markets & Calculate EV")
 
         # Model version picker
         if not models_dir.exists():
@@ -457,7 +441,6 @@ def main():
             )
             return
 
-        st.sidebar.markdown("### Model Version")
         default_index = len(model_files) - 1
         selected_model_file = st.sidebar.selectbox(
             "Select Model Version",
@@ -474,188 +457,186 @@ def main():
 
         dc_model = get_dc_model(str(models_dir), selected_model_file)
 
-        # Match selection
-# Match selection
-# Match selection
-if not matches_csv.exists():
-    st.error(f"`matches.csv` not found at `{matches_csv}`.")
-    return
+        # Ensure matches exist
+        if not matches_csv.exists():
+            st.error(f"`matches.csv` not found at `{matches_csv}`.")
+            return
 
-st.markdown("### Match Selection")
+        # ---------------- MATCH SELECTION ---------------- #
+        st.markdown("### Match Selection")
 
-# 1) Choose league (this drives both fixtures and sport_key)
-league_options = get_league_options()
-league_labels = list(league_options.keys())
-league_label = st.selectbox("League", league_labels, index=0)
-sport_key = league_options[league_label]  # used for live odds & fixtures
+        league_options = get_league_options()
+        league_labels = list(league_options.keys())
+        league_label = st.selectbox("League", league_labels, index=0)
+        sport_key = league_options[league_label]
 
-# 2) Load internal teams by league
-teams_by_league = load_teams_by_league(matches_csv)
-all_teams_internal = load_teams(matches_csv)  # fallback
-internal_team_list = teams_by_league.get(league_label, all_teams_internal)
+        teams_by_league = load_teams_by_league(matches_csv)
+        all_teams_internal = load_teams(matches_csv)
+        internal_team_list = teams_by_league.get(league_label, all_teams_internal)
 
-# 3) Choose input mode: from fixtures or manual
-input_mode = st.radio(
-    "Match Input Mode",
-    ["From today's fixtures (API)", "Manual team selection"],
-    index=0,
-    horizontal=True,
-)
-
-home_team_display = ""
-away_team_display = ""
-home_team = ""
-away_team = ""
-
-api_key_default, base_url_default = get_secrets()
-
-if input_mode == "From today's fixtures (API)":
-    if not api_key_default or not base_url_default:
-        st.warning(
-            "Live odds API is not configured (no ODDS_API_KEY/ODDS_API_BASE). "
-            "Switch to manual selection or set Secrets."
+        input_mode = st.radio(
+            "Match Input Mode",
+            ["From today's fixtures (API)", "Manual team selection"],
+            index=0,
+            horizontal=True,
         )
-        # fallback to manual selection
-        input_mode = "Manual team selection"
-    else:
-        with st.spinner("Fetching today's fixtures for this league..."):
-            fixtures = fetch_fixtures_from_api(
-                api_key_default, base_url_default, sport_key
-            )
 
-        if not fixtures:
-            st.warning(
-                "No fixtures returned from API for this league. "
-                "Switching to manual team selection."
-            )
-            input_mode = "Manual team selection"
-        else:
-            # build label strings for dropdown
-            fixture_labels = [
-                f"{f['home']} vs {f['away']} ({f.get('commence_time','')})"
-                for f in fixtures
-            ]
-            selected_label = st.selectbox("Select Fixture", fixture_labels, index=0)
-            idx = fixture_labels.index(selected_label)
-            fixture = fixtures[idx]
+        region = st.text_input("Region (for API)", value="us")
 
-            home_api = fixture["home"]
-            away_api = fixture["away"]
+        home_team_display = ""
+        away_team_display = ""
+        home_team = ""
+        away_team = ""
 
-            # Map API names to internal team names
-            mapped_home = map_api_team_to_internal(home_api, internal_team_list)
-            mapped_away = map_api_team_to_internal(away_api, internal_team_list)
+        api_key_default, base_url_default = get_secrets()
 
-            if not mapped_home or not mapped_away:
+        if input_mode == "From today's fixtures (API)":
+            if not api_key_default or not base_url_default:
                 st.warning(
-                    "Could not map fixture team names to your internal team list. "
-                    "Please use manual selection instead."
+                    "Live odds API is not configured (no ODDS_API_KEY/ODDS_API_BASE). "
+                    "Switching to manual selection."
                 )
                 input_mode = "Manual team selection"
             else:
-                home_team = mapped_home
-                away_team = mapped_away
-                home_team_display = internal_to_display(home_team)
-                away_team_display = internal_to_display(away_team)
+                with st.spinner("Fetching today's fixtures for this league..."):
+                    fixtures = fetch_fixtures_from_api(
+                        api_key_default, base_url_default, sport_key, region=region
+                    )
 
+                if not fixtures:
+                    st.warning(
+                        "No fixtures returned from API for this league. "
+                        "Switching to manual team selection."
+                    )
+                    input_mode = "Manual team selection"
+                else:
+                    fixture_labels = [
+                        f"{f['home']} vs {f['away']} ({f.get('commence_time','')})"
+                        for f in fixtures
+                    ]
+                    selected_label = st.selectbox("Select Fixture", fixture_labels, index=0)
+                    idx = fixture_labels.index(selected_label)
+                    fixture = fixtures[idx]
+
+                    home_api = fixture["home"]
+                    away_api = fixture["away"]
+
+                    mapped_home = map_api_team_to_internal(home_api, internal_team_list)
+                    mapped_away = map_api_team_to_internal(away_api, internal_team_list)
+
+                    if not mapped_home or not mapped_away:
+                        st.warning(
+                            "Could not map fixture team names to your internal team list. "
+                            "Please use manual selection instead."
+                        )
+                        input_mode = "Manual team selection"
+                    else:
+                        home_team = mapped_home
+                        away_team = mapped_away
+                        home_team_display = internal_to_display(home_team)
+                        away_team_display = internal_to_display(away_team)
+
+                        st.success(
+                            f"Using fixture: **{home_api} vs {away_api}**  \n"
+                            f"Mapped to internal teams: **{home_team_display}** vs "
+                            f"**{away_team_display}**"
+                        )
+
+        if input_mode == "Manual team selection":
+            teams_display = [internal_to_display(t) for t in internal_team_list]
+            col_match1, col_match2 = st.columns(2)
+            with col_match1:
+                home_team_display = st.selectbox("Home Team", teams_display, index=0)
+            with col_match2:
+                default_away_index = 1 if len(teams_display) > 1 else 0
+                away_team_display = st.selectbox(
+                    "Away Team", teams_display, index=default_away_index
+                )
+
+            home_team = display_to_internal(home_team_display)
+            away_team = display_to_internal(away_team_display)
+
+        st.markdown("---")
+
+        # ---------------- LIVE ODDS API CONFIG ---------------- #
+        st.markdown("### Live Odds API")
+
+        col_api1, col_api2 = st.columns(2)
+        with col_api1:
+            if api_key_default and base_url_default:
                 st.success(
-                    f"Using fixture: **{home_api} vs {away_api}**  \n"
-                    f"Mapped to internal teams: **{home_team_display}** vs "
-                    f"**{away_team_display}**"
+                    f"Live odds API configured via Secrets. League: **{league_label}** "
+                    f"({sport_key})"
                 )
-
-if input_mode == "Manual team selection":
-    teams_display = [internal_to_display(t) for t in internal_team_list]
-    col_match1, col_match2 = st.columns(2)
-    with col_match1:
-        home_team_display = st.selectbox("Home Team", teams_display, index=0)
-    with col_match2:
-        default_away_index = 1 if len(teams_display) > 1 else 0
-        away_team_display = st.selectbox(
-            "Away Team", teams_display, index=default_away_index
-        )
-
-    home_team = display_to_internal(home_team_display)
-    away_team = display_to_internal(away_team_display)
-
-st.markdown("---")
-
-        ## League + API config
-# Live odds API config (reuse league_label, sport_key, api_key_default from above)
-col_league2, col_league3 = st.columns(2)
-with col_league2:
-    if api_key_default and base_url_default:
-        st.success(
-            f"Live odds API configured. League: **{league_label}** "
-            f"({sport_key})"
-        )
-    else:
-        st.warning(
-            "Live odds API is not fully configured. "
-            "Set ODDS_API_KEY and ODDS_API_BASE in the app Secrets."
-        )
-with col_league3:
-    region = st.text_input("Region", value="us")
-
-
-# Live odds fetch
-with st.expander("Live Odds (Optional)"):
-    st.write("Gather Live odds and Pre-Fill Odds Selections")
-    if st.button("Gather Live Odds For This Match"):
-        if not api_key_default or not base_url_default:
-            st.warning(
-                "No API key/base URL configured. "
-                "Add ODDS_API_KEY and ODDS_API_BASE in the app Secrets."
-            )
-        else:
-            with st.spinner("Fetching Live Odds..."):
-                live_odds = fetch_live_odds_from_api(
-                    api_key_default,
-                    base_url_default,
-                    sport_key,
-                    home_team_display,
-                    away_team_display,
-                    region=region,
-                )
-            if live_odds is None:
-                st.warning("No Live Odds Found For This Match (or API format mismatch).")
             else:
-                st.success("Live Odds Fetched")
-                for key in [
-                    "home_ml",
-                    "away_ml",
-                    "draw_ml",
-                    "total",
-                    "over_ml",
-                    "under_ml",
-                ]:
-                    if live_odds.get(key) is not None:
-                        st.session_state[key] = live_odds[key]
-                st.json(live_odds)
-
-        # Moneyline inputs
-        st.markdown("### Moneyline")
+                st.warning(
+                    "Live odds API is not fully configured. "
+                    "Set ODDS_API_KEY and ODDS_API_BASE in the app Secrets."
+                )
+        with col_api2:
+            st.write(f"Region: `{region}`")
 
         def ss_get(name: str, default: float) -> float:
             return float(st.session_state.get(name, default))
+
+        with st.expander("Live Odds (Optional)"):
+            st.write("Fetch live odds and pre-fill the American odds fields.")
+            if st.button("Gather Live Odds For This Match"):
+                if not api_key_default or not base_url_default:
+                    st.warning(
+                        "No API key/base URL configured. "
+                        "Add ODDS_API_KEY and ODDS_API_BASE in the app Secrets."
+                    )
+                else:
+                    with st.spinner("Fetching live odds from API..."):
+                        live_odds = fetch_live_odds_from_api(
+                            api_key_default,
+                            base_url_default,
+                            sport_key,
+                            home_team_display,
+                            away_team_display,
+                            region=region,
+                        )
+                    if live_odds is None:
+                        st.warning(
+                            "No live odds found for this match (or API response format mismatch)."
+                        )
+                    else:
+                        st.success("Live odds fetched.")
+                        for key in [
+                            "home_ml",
+                            "away_ml",
+                            "draw_ml",
+                            "total",
+                            "over_ml",
+                            "under_ml",
+                        ]:
+                            if live_odds.get(key) is not None:
+                                st.session_state[key] = live_odds[key]
+                        st.json(live_odds)
+
+        st.markdown("---")
+
+        # ---------------- MONEYLINE INPUTS ---------------- #
+        st.markdown("### Moneyline (American Odds)")
 
         col_ml1, col_ml2, col_ml3 = st.columns(3)
         with col_ml1:
             home_ml = st.number_input(
                 "Home ML",
-                value=ss_get("home_ml", 110),
+                value=ss_get("home_ml", -125.0),
                 key="home_ml_input",
             )
         with col_ml2:
             draw_ml = st.number_input(
                 "Draw ML",
-                value=ss_get("draw_ml", 110),
+                value=ss_get("draw_ml", 310.0),
                 key="draw_ml_input",
             )
         with col_ml3:
             away_ml = st.number_input(
                 "Away ML",
-                value=ss_get("away_ml", 110),
+                value=ss_get("away_ml", 290.0),
                 key="away_ml_input",
             )
 
@@ -663,8 +644,8 @@ with st.expander("Live Odds (Optional)"):
         odds_draw = american_to_decimal(draw_ml)
         odds_away = american_to_decimal(away_ml)
 
-        # Totals inputs
-        st.markdown("### Totals (Over/Under)")
+        # ---------------- TOTALS INPUTS ---------------- #
+        st.markdown("### Totals (Over/Under – American Odds)")
 
         col_tot1, col_tot2, col_tot3 = st.columns(3)
         with col_tot1:
@@ -675,22 +656,22 @@ with st.expander("Live Odds (Optional)"):
             )
         with col_tot2:
             over_ml = st.number_input(
-                "Over Odds",
-                value=ss_get("over_ml", 110),
+                "Over ML",
+                value=ss_get("over_ml", -110.0),
                 key="over_ml_input",
             )
         with col_tot3:
             under_ml = st.number_input(
-                "Under Odds",
-                value=ss_get("under_ml", 110),
+                "Under ML",
+                value=ss_get("under_ml", -110.0),
                 key="under_ml_input",
             )
 
         odds_over = american_to_decimal(over_ml)
         odds_under = american_to_decimal(under_ml)
 
-        # Asian handicap inputs
-        st.markdown("### Asian Handicap")
+        # ---------------- ASIAN HANDICAP INPUTS ---------------- #
+        st.markdown("### Asian Handicap / Spread (American Odds)")
 
         col_ah1, col_ah2, col_ah3 = st.columns(3)
         with col_ah1:
@@ -707,7 +688,7 @@ with st.expander("Live Odds (Optional)"):
 
         st.markdown("---")
 
-        # Evaluate and log
+        # ---------------- RUN MODEL ---------------- #
         if st.button("Run Model And See Best Bets"):
             try:
                 results = evaluate_match_markets(
@@ -728,7 +709,7 @@ with st.expander("Live Odds (Optional)"):
             except KeyError as e:
                 st.error(
                     f"Team `{e}` not found in model. "
-                    f"Ensure it exists in `data/matches.csv`."
+                    f"Ensure it exists in `data/matches.csv` and the model was trained with it."
                 )
                 return
 
@@ -738,16 +719,20 @@ with st.expander("Live Odds (Optional)"):
             )
 
             run_ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-            log_rows: list[dict] = []
+            log_rows: List[Dict] = []
 
-            # Moneyline probabilities (table)
+            # Moneyline probabilities
             st.markdown("#### Moneyline – Probabilities")
             money_probs = results["moneyline"]["probs"]
             prob_df = pd.DataFrame(
-                {"Outcome": list(money_probs.keys()), "Probability": list(money_probs.values())}
+                {
+                    "Outcome": list(money_probs.keys()),
+                    "Probability": list(money_probs.values()),
+                }
             )
             st.table(prob_df)
 
+            # Moneyline EV
             st.markdown("#### Moneyline – Expected Value (Best First)")
             for bet in results["moneyline"]["bets"]:
                 row = {
@@ -778,8 +763,9 @@ with st.expander("Live Odds (Optional)"):
 
             st.markdown("---")
 
-            # Totals
+            # Totals EV
             st.markdown("#### Totals (Over/Under) – Expected Value")
+            totals_line_str = str(results["totals"]["line"])
             for bet in results["totals"]["bets"]:
                 row = {
                     "run_timestamp_utc": run_ts,
@@ -799,7 +785,7 @@ with st.expander("Live Odds (Optional)"):
                 st.markdown(
                     format_ev_line(
                         selection=bet.selection,
-                        line_str=str(results["totals"]["line"]),
+                        line_str=totals_line_str,
                         prob=bet.prob,
                         ev=bet.ev,
                         ev_percent=bet.ev_percent,
@@ -809,8 +795,9 @@ with st.expander("Live Odds (Optional)"):
 
             st.markdown("---")
 
-            # Asian handicap
+            # Asian handicap EV
             st.markdown("#### Asian Handicap – Expected Value")
+            asian_line_str = str(results["asian"]["line"])
             for bet in results["asian"]["bets"]:
                 row = {
                     "run_timestamp_utc": run_ts,
@@ -830,7 +817,7 @@ with st.expander("Live Odds (Optional)"):
                 st.markdown(
                     format_ev_line(
                         selection=bet.selection,
-                        line_str=str(results["asian"]["line"]),
+                        line_str=asian_line_str,
                         prob=bet.prob,
                         ev=bet.ev,
                         ev_percent=bet.ev_percent,
