@@ -267,7 +267,7 @@ def main():
             with st.spinner("Running Bayesian Training via train_only.main()..."):
                 # This calls your existing training script (versioning + index)
                 train_only.main()
-            st.success("Training Complete. Model Updated."):
+            st.success("Training Complete. Model Updated.")
             # Clear cached models in prediction tab
             st.cache_resource.clear()
 
